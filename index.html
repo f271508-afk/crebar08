@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>柱鋼筋續接器計算系統</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; font-size: 13px; }
+        th { background-color: #f3f4f6; }
+        .data-row:hover { background-color: #f9fafb; }
+        .total-row { background-color: #fef3c7; font-weight: bold; }
+        .toggle-btn { padding: 4px 8px; font-size: 10px; cursor: pointer; border: 1px solid #ccc; background: #fff; }
+        .toggle-btn.active { background: #3b82f6; color: white; border-color: #2563eb; }
+    </style>
+</head>
+<body class="bg-gray-100 p-4">
+    <div class="max-w-7xl mx-auto bg-white p-6 rounded-lg shadow-lg">
+        <h1 class="text-xl font-bold mb-4 text-gray-800">柱鋼筋續接器與長度統計</h1>
+        
+        <div class="mb-4 flex flex-wrap gap-4 items-center">
+            <div class="p-4 bg-blue-50 rounded flex items-center gap-4">
+                <label class="font-bold text-gray-700">插筋長度係數 (D):</label>
+                <input type="number" id="dFactor" value="60" class="w-20 p-1 border rounded text-center" oninput="sortData()">
+            </div>
+            <button onclick="forceRecalculate()" class="bg-amber-600 text-white px-4 py-2 rounded hover:bg-amber-700">強制重算</button>
+            <button onclick="exportExcel()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">匯出完整 Excel</button>
+            <label class="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 cursor-pointer">
+                匯入 Excel<input type="file" class="hidden" accept=".xlsx" onchange="importExcel(event)">
+            </label>
+        </div>
+        
+        <div class="overflow-x-auto">
+            <table id="rebarTable">
+                <thead>
+                    <tr><th>樓層</th><th>樓高(cm)</th><th>編號</th><th>柱數</th><th>號數</th><th>支數</th><th>續接方式</th><th>插筋</th><th>錨錠</th><th>長度(m)</th><th>操作</th></tr>
+                </thead>
+                <tbody id="tableBody"></tbody>
+            </table>
+        </div>
+
+        <div class="mt-6">
+            <button onclick="addRow()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">+ 新增樓層</button>
+        </div>
+
+        <div id="results" class="mt-6 space-y-8">
+            <div id="totalSummary"></div>
+            <div id="rangeSummary"></div>
+        </div>
+    </div>
+
+    <script>
+        const rebarOptions = [6, 7, 8, 9, 10, 11];
+        const unitWeights = { 6: 2.25, 7: 3.04, 8: 3.98, 9: 5.06, 10: 6.42, 11: 7.99 };
+        let floorData = [{ floor: '1F', height: 300, code: 'C1', colCount: 1, rebarNo: 10, pcs: 26, connection: '逐層', length: 3.0, insert: 26, anchor: 26 }];
+        let currentStats = { byNo: {}, totals: {}, ranges: {} };
+
+        const fmt = (num) => num.toLocaleString('en-US');
+
+        function importExcel(e) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                const wb = XLSX.read(evt.target.result, {type: 'array'});
+                floorData = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+                sortData();
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        function toggleConnection(index, type) { floorData[index].connection = type; sortData(); }
+        function forceRecalculate() { floorData.forEach(r => { delete r.insert; delete r.anchor; }); sortData(); }
+
+        function updateAutoCalc() {
+            floorData.sort((a, b) => (a.code !== b.code) ? String(a.code).localeCompare(String(b.code)) : (a.floor.includes('B') ? -parseInt(a.floor.replace('B','')) : parseInt(a.floor)) - (b.floor.includes('B') ? -parseInt(b.floor.replace('B','')) : parseInt(b.floor)));
+            floorData.forEach((cur, i) => {
+                const prev = floorData[i-1], next = floorData[i+1];
+                const isPrevSameCol = (prev && prev.code === cur.code), isNextSameCol = (next && next.code === cur.code);
+                cur.length = cur.connection === '逐層' ? cur.height / 100 : (cur.height + (isNextSameCol ? next.height : 0)) / 100;
+                let anchorVal = !isNextSameCol ? (cur.pcs * cur.colCount) : Math.max(0, (cur.pcs - (next?.pcs || 0)) * cur.colCount);
+                if (cur.insert === undefined) cur.insert = (isPrevSameCol ? Math.max(0, (cur.pcs - prev.pcs) * cur.colCount) : 0) + anchorVal;
+                if (cur.anchor === undefined) cur.anchor = anchorVal;
+            });
+        }
+
+        function updateSummary() {
+            const dFactor = parseFloat(document.getElementById('dFactor').value) || 60;
+            let byNo = {}, totals = {ten:0, insert:0, anchor:0, weight:0}, ranges = {"<5m":0, "5-6m":0, "6-7m":0, "7-8m":0, "8-9m":0, "9-10m":0, ">10m":0};
+            floorData.forEach(r => {
+                if(!byNo[r.rebarNo]) byNo[r.rebarNo] = {ten:0, insert:0, anchor:0, weight:0};
+                const tot = (r.pcs || 0) * (r.colCount || 0);
+                const ten = (r.connection === '逐層' ? tot : Math.ceil(tot/2));
+                const ins = (r.insert || 0);
+                const anc = (r.anchor || 0);
+                const w = Math.round(ins * (r.rebarNo * 0.03175 * dFactor) * (unitWeights[r.rebarNo] || 0));
+                
+                byNo[r.rebarNo].ten += ten;
+                byNo[r.rebarNo].insert += ins;
+                byNo[r.rebarNo].anchor += anc;
+                byNo[r.rebarNo].weight += w;
+                
+                totals.ten += ten; totals.insert += ins; totals.anchor += anc; totals.weight += w;
+                
+                const l = r.length || 0;
+                const rng = l < 5 ? "<5m" : l < 6 ? "5-6m" : l < 7 ? "6-7m" : l < 8 ? "7-8m" : l < 9 ? "8-9m" : l < 10 ? "9-10m" : ">10m";
+                ranges[rng] += tot;
+            });
+            currentStats = { byNo, totals, ranges };
+            document.getElementById('totalSummary').innerHTML = `<h2 class="font-bold text-gray-700 mb-2 border-l-4 border-blue-600 pl-2">鋼筋統計總表</h2><table><thead><tr><th>號數</th><th>續接器</th><th>插筋</th><th>錨錠</th><th>重量(kg)</th></tr></thead><tbody>` + Object.entries(byNo).map(([n, d]) => `<tr><td>#${n}</td><td>${fmt(d.ten)}</td><td>${fmt(d.insert)}</td><td>${fmt(d.anchor)}</td><td>${fmt(d.weight)}</td></tr>`).join('') + `<tr class="total-row"><td>合計</td><td>${fmt(totals.ten)}</td><td>${fmt(totals.insert)}</td><td>${fmt(totals.anchor)}</td><td>${fmt(totals.weight)}</td></tr></tbody></table>`;
+            document.getElementById('rangeSummary').innerHTML = `<h2 class="font-bold text-gray-700 mb-2 border-l-4 border-blue-600 pl-2">長度區間統計 (支數)</h2><table><thead><tr>` + Object.keys(ranges).map(k => `<th>${k}</th>`).join('') + `</tr></thead><tbody><tr>` + Object.values(ranges).map(v => `<td>${fmt(v)}</td>`).join('') + `</tr></tbody></table>`;
+        }
+
+        function renderTable() {
+            document.getElementById('tableBody').innerHTML = floorData.map((row, i) => `
+                <tr class="data-row">
+                    <td><input type="text" value="${row.floor}" class="w-16 text-center" onblur="handleBlur(${i}, 'floor', this.value)"></td>
+                    <td><input type="number" value="${row.height}" class="w-16 text-center" onblur="handleBlur(${i}, 'height', parseInt(this.value))"></td>
+                    <td><input type="text" value="${row.code}" class="w-16 text-center" onblur="handleBlur(${i}, 'code', this.value)"></td>
+                    <td><input type="number" value="${row.colCount}" class="w-12 text-center" onblur="handleBlur(${i}, 'colCount', parseInt(this.value))"></td>
+                    <td><select onchange="floorData[${i}].rebarNo=parseInt(this.value); sortData()">${rebarOptions.map(n => `<option value="${n}" ${row.rebarNo==n?'selected':''}>#${n}</option>`).join('')}</select></td>
+                    <td><input type="number" value="${row.pcs}" class="w-12 text-center" onblur="handleBlur(${i}, 'pcs', parseInt(this.value))"></td>
+                    <td>
+                        <button class="toggle-btn ${row.connection==='逐層'?'active':''}" onclick="toggleConnection(${i}, '逐層')">逐層</button>
+                        <button class="toggle-btn ${row.connection==='跳層'?'active':''}" onclick="toggleConnection(${i}, '跳層')">跳層</button>
+                    </td>
+                    <td><input type="number" value="${row.insert}" class="w-12 text-center" onblur="handleBlur(${i}, 'insert', parseInt(this.value))"></td>
+                    <td><input type="number" value="${row.anchor}" class="w-12 text-center" onblur="handleBlur(${i}, 'anchor', parseInt(this.value))"></td>
+                    <td>${(row.length||0).toFixed(2)}</td>
+                    <td><button onclick="floorData.splice(${i},1); sortData()" class="text-red-500">刪除</button></td>
+                </tr>
+            `).join('');
+            updateSummary();
+        }
+
+        function handleBlur(i, f, v) { floorData[i][f] = v; sortData(); }
+        function sortData() { updateAutoCalc(); renderTable(); }
+        function addRow() { floorData.push({ floor: '1F', height: 300, code: 'C1', colCount: 1, rebarNo: 10, pcs: 26, connection: '逐層', length: 3.0, insert: 26, anchor: 26 }); sortData(); }
+        function exportExcel() {
+            // 匯出前過濾，僅包含業務需要的欄位
+            const exportData = floorData.map(({ floor, height, code, colCount, rebarNo, pcs, insert, anchor, length }) => ({
+                樓層: floor, 樓高: height, 編號: code, 柱數: colCount, 號數: rebarNo, 支數: pcs, 插筋: insert, 錨錠: anchor, 長度: length
+            }));
+            const wsData = XLSX.utils.json_to_sheet(exportData);
+            const statsArray = Object.entries(currentStats.byNo).map(([n, d]) => ({ 號數: '#'+n, 續接器: d.ten, 插筋: d.insert, 錨錠: d.anchor, 重量: d.weight }));
+            statsArray.push({ 號數: '合計', 續接器: currentStats.totals.ten, 插筋: currentStats.totals.insert, 錨錠: currentStats.totals.anchor, 重量: currentStats.totals.weight });
+            const wsStats = XLSX.utils.json_to_sheet(statsArray);
+            const rangeArray = [currentStats.ranges];
+            const wsRange = XLSX.utils.json_to_sheet(rangeArray);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, wsData, "原始數據");
+            XLSX.utils.book_append_sheet(wb, wsStats, "鋼筋統計");
+            XLSX.utils.book_append_sheet(wb, wsRange, "長度區間統計");
+            XLSX.writeFile(wb, "鋼筋統計報告.xlsx");
+        }
+        sortData();
+    </script>
+</body>
+</html>
